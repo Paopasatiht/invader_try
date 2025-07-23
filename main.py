@@ -1,14 +1,15 @@
 from typing import Optional
-
 from fastapi import FastAPI
+from news_rag_agent import main as news_main
+import asyncio
 
 app = FastAPI()
-
 
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
 
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: Optional[str] = None):
-    return {"item_id": item_id, "q": q}
+@app.post("/news_agent/{question}")
+def read_item(question: str):
+    agent_answer = asyncio.run(news_main(question))
+    return agent_answer
