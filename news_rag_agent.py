@@ -106,6 +106,32 @@ class SearchPlugin:
 
 
 # === System Prompt ===
+system_prompt_ORCHESTRATOR = f"""You are the world's top investment market analyst with access to comprehensive data collected from specialized fund managers. Your task is to summarize this information clearly and concisely so that fund clients can easily understand the key insights.
+
+  ### Instructions:
+  1. Review the provided investment market data carefully.
+  2. Extract and highlight the most important trends, risks, and opportunities relevant to fund clients.
+  3. Use simple, clear language, avoiding technical jargon and keep things concise to ensure accessibility.
+  4. If you cite pages in the body, also mention which document.
+  5. Design the structure the summary without separating data from different managers logically, for example, if the question is 'Give me an overview of Thai economy in 2025.':
+     - Market Overview
+     - Key Trends
+     - Risks and Challenges
+     - Opportunities
+     - Recommendations for Fund Clients
+  6. Cite reference for every information possible, along with its document name.
+
+  ### Guidelines:
+  - Focus only on the information provided; do not add external data.
+  - Do not make up comparison unless obviously stated in the given information, e.g. Thai bonds vs Foreign bonds.
+  - Keep the summary concise but informative.
+  - Ensure the tone is professional and client-friendly.
+  - End the conversation by including all references and asking the user if they have anymore question.
+
+  ### Output Format:
+  Provide the summary in natural, native, friendly languange, organized with clear headings as outlined above.
+"""
+
 system_prompt_RAG = f"""You are a helpful, professional financial assistant. Answer **only** from the provided data — no external knowledge or assumptions.
 
   Instructions:
@@ -158,7 +184,7 @@ def get_keyword_extractor_agent(kernel: Kernel) -> ChatCompletionAgent:
         kernel.add_service(
             AzureChatCompletion(
                 service_id="keyword_chat_service",
-                deployment_name=deployment,
+                deployment_name="gpt-4.1-nano",
                 api_key=subscription_key,
                 endpoint=endpoint,
             )
@@ -249,8 +275,38 @@ async def run_mmrag_agent(agents, search, user_query, search_keywords, filter=No
     return response_text
 
 
-# === Final Orchestrator ===
-async def get_agent_response(user_query: str, pdf_rag_agent, keyword_extractor_agent, pdf_search) -> tuple[str, str]:
+def get_orchestrator_agent(kernel: Kernel, agent_name: str) -> ChatCompletionAgent:
+    # Add AzureChatCompletion service only if not added yet
+    if "orchestrator" not in kernel.services:
+        kernel.add_service(
+            AzureChatCompletion(
+                service_id="orchestrator",
+                deployment_name="gpt-4.1-mini",
+                api_key=subscription_key,
+                endpoint=endpoint,
+            )
+        )
+
+    settings = AzureChatPromptExecutionSettings(
+        service_id="orchestrator",
+        temperature=0.3,
+        top_p=0.9,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+    )
+    system_prompt = system_prompt_ORCHESTRATOR
+    agent = ChatCompletionAgent(
+        kernel=kernel,
+        arguments=KernelArguments(settings=settings),
+        name=agent_name,
+        instructions=system_prompt,
+    )
+    return agent
+
+
+# === Final Message ===
+async def get_agent_response(user_query: str, pdf_rag_agent, keyword_extractor_agent, orchestrator_agent, pdf_search) -> \
+tuple[str, str]:
     keyword_agent_user_prompt = f"Extract keywords from this query: {user_query}"
     keyword_agent_message = ChatMessageContent(role=AuthorRole.USER,
                                                content=keyword_agent_user_prompt)  # === Token count for input to keyword agent
@@ -258,7 +314,7 @@ async def get_agent_response(user_query: str, pdf_rag_agent, keyword_extractor_a
     search_keywords = user_query
     async for response in keyword_extractor_agent.invoke(messages=[keyword_agent_message]):
         search_keywords = str(response)
-    response_1, response_2, response_3 = await asyncio.gather(
+    responses = await asyncio.gather(
         run_mmrag_agent(pdf_rag_agent, pdf_search, user_query, search_keywords,
                         filter="key_prefix eq 'monthlystandpoint'", top_k=10),
         run_mmrag_agent(pdf_rag_agent, pdf_search, user_query, search_keywords, filter="key_prefix eq 'ktm'", top_k=20),
@@ -266,12 +322,31 @@ async def get_agent_response(user_query: str, pdf_rag_agent, keyword_extractor_a
                         top_k=40),
     )
 
-    # Combine with source labels
-    final_text_response = (
-        f"from monthlystandpoint: {response_1}\n\n"
-        f"from ktm: {response_2}\n\n"
-        f"from kcma: {response_3}"
-    )
+    orchestrator_prompt = f"""The information given to you are:
+
+        information from Monthly Standpoint (monthlystandpoint) document (covering news in this month):
+        {responses[0]}
+
+        information from Know the Markets (KTM) document (covering news in this quarter):
+        {responses[1]}
+
+        information from KAsset Capital Market Assumptions (KCMA) document (publish at the start of the year, covering assumptions for the whole year):
+        {responses[2]}
+
+        If {user_query} mention specific documents, left out what is not stated.
+        Otherwise, consider all three, but prioritize KCMA and monthlystandpoint over KTM in terms of correctness.
+        Cross-check the fact and use those to answer the original question:
+        {user_query}
+
+        Please write your final response in a clear Thai, structured way. Make sure no important point is missed.
+        """
+
+    orchestrator_message = ChatMessageContent(role=AuthorRole.USER, content=orchestrator_prompt)
+
+    final_text_response = ""
+
+    async for orchestration in orchestrator_agent.invoke(messages=[orchestrator_message]):
+        final_text_response = str(orchestration)
 
     return final_text_response
 
@@ -280,12 +355,12 @@ async def main(question):
     kernel = Kernel()
     pdf_rag_agent = get_mm_rag_agent(kernel)
     keyword_extractor_agent = get_keyword_extractor_agent(kernel)
+    orchestrator_agent = get_orchestrator_agent(kernel, "news_orchestrator")
     pdf_search = get_mm_search_plugin(
         text_index_name="pdf-economic-summary",
         table_index_name="pdf-economic-summary-tables",
         image_index_name="pdf-economic-summary-images"
     )
-    return await get_agent_response(question, pdf_rag_agent, keyword_extractor_agent, pdf_search)
+    return await get_agent_response(question, pdf_rag_agent, keyword_extractor_agent, orchestrator_agent, pdf_search)
 
-
-# print(asyncio.run(main()))
+# print(asyncio.run(main('test')))
