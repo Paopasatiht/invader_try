@@ -9,7 +9,7 @@ app = FastAPI()
 async def root():
     return {"message": "Hello World"}
 
-@app.post("/news_agent/{question}")
-def read_item(question: str):
+@app.get("/news_agent/{question}")
+def news_agent(question: str):
     agent_answer = asyncio.run(news_main(question))
-    return agent_answer
+    return {"agent_answer": agent_answer}
